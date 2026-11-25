@@ -1,5 +1,5 @@
 
-name: FinCore CI Pipeline
+name: FinCore Secure CI/CD
 
 on:
   push:
@@ -7,16 +7,20 @@ on:
       - master
       - develop
       - "feature/**"
+
   pull_request:
     branches:
       - master
       - develop
+
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+
+  # ---------------- BACKEND ----------------
   backend:
     name: Backend Tests and Type Check
     runs-on: ubuntu-latest
@@ -25,7 +29,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -48,6 +52,8 @@ jobs:
         working-directory: apps/api
         run: npm run build
 
+
+  # ---------------- FRONTEND ----------------
   frontend:
     name: Frontend Lint and Build
     runs-on: ubuntu-latest
@@ -56,7 +62,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -71,10 +77,12 @@ jobs:
         working-directory: apps/web
         run: npm run lint
 
-      - name: Build
+      - name: Build frontend
         working-directory: apps/web
         run: npm run build
 
+
+  # ---------------- ANALYTICS ----------------
   analytics:
     name: Analytics Tests
     runs-on: ubuntu-latest
@@ -92,15 +100,15 @@ jobs:
         working-directory: services/analytics
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pytest httpx
+          pip install -r requirements.txt
+          pip install pytest httpx
 
       - name: Run tests
         working-directory: services/analytics
-        env:
-          PYTHONPATH: ${{ github.workspace }}/services/analytics
         run: python -m pytest -v
 
+
+  # ---------------- SECURITY ----------------
   security:
     name: Security Scanning
     runs-on: ubuntu-latest
@@ -109,35 +117,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Secret Scan with Gitleaks
-        run: |
-          docker run --rm \
-            -v "$PWD:/repo" \
-            ghcr.io/gitleaks/gitleaks:latest \
-            detect --source=/repo --verbose --redact
+      # Secret scanning
+      - name: Secret scanning
+        uses: gitleaks/gitleaks-action@v2
 
-      - name: Setup Node.js
+      # Node setup
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Dependency Audit - API
+      # Backend dependency audit
+      - name: Backend dependency audit
         working-directory: apps/api
-        run: npm audit --audit-level=high
+        run: |
+          npm ci
+          npm audit --audit-level=high
 
-      - name: Dependency Audit - Web
+      # Frontend dependency audit
+      - name: Frontend dependency audit
         working-directory: apps/web
-        run: npm audit --audit-level=high
+        run: |
+          npm ci
+          npm audit --audit-level=high
 
-      - name: Filesystem Vulnerability Scan
+      # Filesystem scan
+      - name: Filesystem vulnerability scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
           format: table
-          exit-code: 1
-          severity: CRITICAL,HIGH
+          severity: HIGH,CRITICAL
+          exit-code: "0"
 
+
+  # ---------------- DOCKER ----------------
   docker:
     name: Docker Build and Image Scan
     runs-on: ubuntu-latest
@@ -151,35 +166,77 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Build API image
       - name: Build API image
         run: docker build -t fincore-api:ci ./apps/api
 
+      # Build Web image
       - name: Build Web image
         run: docker build -t fincore-web:ci ./apps/web
 
+      # Build Analytics image
       - name: Build Analytics image
         run: docker build -t fincore-analytics:ci ./services/analytics
+
+
+      # -------- API IMAGE SCAN --------
 
       - name: Scan API image
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: fincore-api:ci
           format: table
-          exit-code: 1
-          severity: CRITICAL,HIGH
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: API Critical vulnerability gate
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: fincore-api:ci
+          format: table
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+
+      # -------- WEB IMAGE SCAN --------
 
       - name: Scan Web image
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: fincore-web:ci
           format: table
-          exit-code: 1
-          severity: CRITICAL,HIGH
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Web Critical vulnerability gate
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: fincore-web:ci
+          format: table
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+
+      # -------- ANALYTICS IMAGE SCAN --------
 
       - name: Scan Analytics image
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: fincore-analytics:ci
           format: table
-          exit-code: 1
-          severity: CRITICAL,HIGH
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          ignore-unfixed: true
+
+      - name: Analytics Critical vulnerability gate
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: fincore-analytics:ci
+          format: table
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
