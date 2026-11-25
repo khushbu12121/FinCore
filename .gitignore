@@ -30,3 +30,12 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Assessment 14 deployment secrets
+infra/deployment/certs/*.key
+infra/deployment/certs/*.crt
+docker-compose.yml.assessment14-backup
+# Assessment 14 backups and restore temporary files
+backups/
+infra/deployment/certs/
+infra/deployment/*.tmp
