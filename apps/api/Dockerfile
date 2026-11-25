@@ -1,3 +1,4 @@
+
 FROM node:24-alpine AS builder
 
 WORKDIR /app
@@ -7,12 +8,17 @@ RUN npm ci
 
 COPY . .
 RUN npm run build
+
 RUN npm prune --omit=dev
 
 
+# Production stage
 FROM node:24-alpine AS production
 
 WORKDIR /app
+
+# Update npm to reduce vulnerabilities in bundled npm dependencies
+RUN npm install -g npm@latest && npm cache clean --force
 
 ENV NODE_ENV=production
 
