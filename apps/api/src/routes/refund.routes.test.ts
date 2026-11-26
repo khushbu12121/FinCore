@@ -32,7 +32,7 @@ const validRefund = {
   reason: "Customer requested refund"
 };
 
-const IDEMPOTENCY_KEY = "refund-test-key-001";
+const IDEMPOTENCY_KEY = "test-key";
 
 describe("Refund route tests", () => {
   const client = {
