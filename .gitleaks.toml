@@ -1,0 +1,5 @@
+[allowlist]
+description = "Allow dummy idempotency key used in refund tests"
+fingerprints = [
+  "dfe50fb4b7a8aeac509e55b3df9c50b81e1afc95:apps/api/src/routes/refund.routes.test.ts:generic-api-key:35"
+]
