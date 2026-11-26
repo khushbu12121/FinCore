@@ -1,233 +1,590 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-const API = "http://localhost:5002";
+const API = "http://localhost:5001";
 
-interface Customer {
+type Customer = {
   id: string;
-  full_name?: string;
-  email?: string;
-}
+  full_name: string;
+  email: string;
+  status: string;
+};
 
-interface Wallet {
+type Wallet = {
   id: string;
+  customer_id: string;
   full_name?: string;
   currency: string;
-  status: string;
   balance: number | string;
-}
-
-interface Transfer {
-  id: string;
   status: string;
+};
+
+type Transfer = {
+  id: string;
+  from_wallet_id: string;
+  to_wallet_id: string;
   amount: number | string;
-}
+  currency: string;
+  status: string;
+  created_at: string;
+};
 
-interface Payment {
+type Payment = {
   id: string;
-  status?: string;
-  amount?: number | string;
-}
+  amount: number | string;
+  currency: string;
+  status: string;
+  created_at: string;
+};
 
-interface Dispute {
+type Dispute = {
   id: string;
   status: string;
-}
+  reason?: string;
+  created_at: string;
+};
 
-export default function Home() {
+export default function DashboardPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [disputes, setDisputes] = useState<Dispute[]>([]);
+
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    async function loadDashboard() {
-      try {
-        const [c, w, t, p, d] = await Promise.all([
-          fetch(`${API}/api/customers`),
-          fetch(`${API}/api/wallets`),
-          fetch(`${API}/api/transfers`),
-          fetch(`${API}/api/payment-intents`),
-          fetch(`${API}/api/disputes`),
-        ]);
+  const fetchDashboard = useCallback(async () => {
+    setError("");
 
-        const [cd, wd, td, pd, dd] = await Promise.all([
-          c.json(),
-          w.json(),
-          t.json(),
-          p.json(),
-          d.json(),
-        ]);
+    try {
+      const [
+        customersResponse,
+        walletsResponse,
+        transfersResponse,
+        paymentsResponse,
+        disputesResponse,
+      ] = await Promise.all([
+        fetch(`${API}/api/customers`),
+        fetch(`${API}/api/wallets`),
+        fetch(`${API}/api/transfers`),
+        fetch(`${API}/api/payment-intents`),
+        fetch(`${API}/api/disputes`),
+      ]);
 
-        setCustomers(cd.customers || []);
-        setWallets(wd.wallets || []);
-        setTransfers(td.transactions || []);
-        setPayments(pd.paymentIntents || []);
-        setDisputes(dd.disputes || []);
-      } catch (error) {
-        console.error("Dashboard loading failed:", error);
-      } finally {
-        setLoading(false);
+      const [
+        customersData,
+        walletsData,
+        transfersData,
+        paymentsData,
+        disputesData,
+      ] = await Promise.all([
+        customersResponse.json(),
+        walletsResponse.json(),
+        transfersResponse.json(),
+        paymentsResponse.json(),
+        disputesResponse.json(),
+      ]);
+
+      if (
+        !customersResponse.ok ||
+        !walletsResponse.ok ||
+        !transfersResponse.ok ||
+        !paymentsResponse.ok ||
+        !disputesResponse.ok
+      ) {
+        throw new Error("Unable to load dashboard data");
       }
-    }
 
-    loadDashboard();
+      setCustomers(customersData.customers || []);
+      setWallets(walletsData.wallets || []);
+      setTransfers(transfersData.transactions || []);
+      setPayments(paymentsData.paymentIntents || []);
+      setDisputes(disputesData.disputes || []);
+    } catch (err: any) {
+      setError(err.message || "Could not connect to backend");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const totalBalance = wallets.reduce(
-    (sum, wallet) => sum + Number(wallet.balance || 0),
-    0
-  );
+  useEffect(() => {
+    fetchDashboard();
+  }, [fetchDashboard]);
 
-  const stats = [
-    { label: "Customers", value: customers.length },
-    { label: "Total Wallets", value: wallets.length },
-    { label: "Transfers", value: transfers.length },
-    { label: "Payment Intents", value: payments.length },
-    {
-      label: "Open Disputes",
-      value: disputes.filter((d) => d.status === "OPEN").length,
-    },
-  ];
+  const refresh = async () => {
+    setRefreshing(true);
+    await fetchDashboard();
+    setRefreshing(false);
+  };
+
+  const totalWalletBalance = wallets.reduce((sum, wallet) => {
+    const balance = Number(wallet.balance);
+
+    return sum + (Number.isFinite(balance) ? balance : 0);
+  }, 0);
+
+  const activeCustomers = customers.filter(
+    (customer) => customer.status === "ACTIVE"
+  ).length;
+
+  const activeWallets = wallets.filter(
+    (wallet) => wallet.status === "ACTIVE"
+  ).length;
+
+  const pendingPayments = payments.filter(
+    (payment) => payment.status === "PENDING"
+  ).length;
+
+  const pendingDisputes = disputes.filter(
+    (dispute) => dispute.status === "PENDING"
+  ).length;
+
+  const completedTransfers = transfers.filter((transfer) =>
+    ["COMPLETED", "SUCCESS", "SUCCEEDED"].includes(
+      transfer.status?.toUpperCase()
+    )
+  ).length;
+
+  const recentTransfers = [...transfers]
+    .sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() -
+        new Date(a.created_at).getTime()
+    )
+    .slice(0, 5);
+
+  const formatCurrency = (value: number) =>
+    value.toLocaleString("en-IN", {
+      style: "currency",
+      currency: "INR",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+
+  const formatDate = (value: string) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return value;
+
+    return date.toLocaleString("en-IN", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
 
   return (
-    <main className="min-h-screen bg-slate-950 text-white">
-      <div className="flex min-h-screen">
-        <aside className="hidden w-64 border-r border-slate-800 bg-slate-900 p-6 md:block">
-          <h1 className="text-2xl font-bold text-cyan-400">FinCore</h1>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+            Dashboard
+          </h1>
 
-          <p className="mt-2 text-sm text-slate-400">
-            Digital Banking Platform
+          <p className="mt-1 text-sm text-slate-500">
+            Real-time overview of your FinCore banking system
+          </p>
+        </div>
+
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+        >
+          {refreshing ? "Refreshing..." : "↻ Refresh Data"}
+        </button>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+
+          <button
+            onClick={refresh}
+            className="ml-3 font-semibold underline"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Main Stats */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          title="Total Customers"
+          value={loading ? "..." : customers.length.toLocaleString("en-IN")}
+          description={`${activeCustomers} active customers`}
+          icon="👥"
+          color="blue"
+        />
+
+        <StatCard
+          title="Total Wallets"
+          value={loading ? "..." : wallets.length.toLocaleString("en-IN")}
+          description={`${activeWallets} active wallets`}
+          icon="💳"
+          color="purple"
+        />
+
+        <StatCard
+          title="Total Wallet Balance"
+          value={loading ? "..." : formatCurrency(totalWalletBalance)}
+          description="Combined wallet balances"
+          icon="💰"
+          color="green"
+        />
+
+        <StatCard
+          title="Transfers"
+          value={loading ? "..." : transfers.length.toLocaleString("en-IN")}
+          description={`${completedTransfers} completed`}
+          icon="↔️"
+          color="orange"
+        />
+      </div>
+
+      {/* Second Row */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard
+          title="Payment Intents"
+          value={loading ? "..." : payments.length.toLocaleString("en-IN")}
+          description={`${pendingPayments} pending`}
+          icon="📄"
+          color="blue"
+        />
+
+        <StatCard
+          title="Disputes"
+          value={loading ? "..." : disputes.length.toLocaleString("en-IN")}
+          description={`${pendingDisputes} pending`}
+          icon="⚠️"
+          color="red"
+        />
+
+        <StatCard
+          title="System Status"
+          value={error ? "Error" : loading ? "Loading..." : "Connected"}
+          description="Backend API connection"
+          icon="🟢"
+          color="green"
+        />
+      </div>
+
+      {/* Recent Transfers */}
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-200 p-5">
+          <div>
+            <h2 className="font-semibold text-slate-900">
+              Recent Transfers
+            </h2>
+
+            <p className="mt-1 text-xs text-slate-500">
+              Latest transfer activity
+            </p>
+          </div>
+
+          <a
+            href="/transfers"
+            className="text-sm font-medium text-blue-600 hover:text-blue-700"
+          >
+            View all →
+          </a>
+        </div>
+
+        {loading ? (
+          <div className="space-y-3 p-5">
+            {[1, 2, 3].map((item) => (
+              <div
+                key={item}
+                className="h-12 animate-pulse rounded-lg bg-slate-100"
+              />
+            ))}
+          </div>
+        ) : recentTransfers.length === 0 ? (
+          <div className="p-10 text-center">
+            <div className="text-3xl">↔️</div>
+
+            <p className="mt-3 font-medium text-slate-800">
+              No transfers yet
+            </p>
+
+            <p className="mt-1 text-sm text-slate-500">
+              Transactions will appear here when created.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[700px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-5 py-3 font-semibold">Transfer ID</th>
+                  <th className="px-5 py-3 font-semibold">From Wallet</th>
+                  <th className="px-5 py-3 font-semibold">To Wallet</th>
+                  <th className="px-5 py-3 font-semibold">Amount</th>
+                  <th className="px-5 py-3 font-semibold">Status</th>
+                  <th className="px-5 py-3 font-semibold">Date</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-slate-100">
+                {recentTransfers.map((transfer) => (
+                  <tr
+                    key={transfer.id}
+                    className="transition hover:bg-slate-50"
+                  >
+                    <td className="px-5 py-4 font-mono text-xs text-slate-500">
+                      {transfer.id}
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-slate-600">
+                      {transfer.from_wallet_id}
+                    </td>
+
+                    <td className="px-5 py-4 font-mono text-xs text-slate-600">
+                      {transfer.to_wallet_id}
+                    </td>
+
+                    <td className="px-5 py-4 font-semibold text-slate-900">
+                      {formatCurrency(Number(transfer.amount))}
+                    </td>
+
+                    <td className="px-5 py-4">
+                      <StatusBadge status={transfer.status} />
+                    </td>
+
+                    <td className="px-5 py-4 text-slate-500">
+                      {formatDate(transfer.created_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Overview */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Wallet Overview */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h2 className="font-semibold text-slate-900">
+            Wallet Overview
+          </h2>
+
+          <p className="mt-1 text-sm text-slate-500">
+            Current wallet distribution
           </p>
 
-          <nav className="mt-10 space-y-4 text-slate-300">
-            <p className="rounded-lg bg-cyan-500/10 p-3 text-cyan-300">
-              Dashboard
-            </p>
-            <p className="p-3">Customers</p>
-            <p className="p-3">Wallets</p>
-            <p className="p-3">Transfers</p>
-            <p className="p-3">Beneficiaries</p>
-            <p className="p-3">Payments</p>
-            <p className="p-3">Disputes</p>
-            <p className="p-3">Statements</p>
-          </nav>
-        </aside>
+          <div className="mt-5 space-y-4">
+            <OverviewRow
+              label="Active Wallets"
+              value={activeWallets}
+              total={wallets.length}
+              color="bg-green-500"
+            />
 
-        <section className="flex-1 p-6 md:p-10">
-          <header className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="text-3xl font-bold">Dashboard</h2>
-              <p className="mt-2 text-slate-400">
-                Financial overview and transaction monitoring
-              </p>
-            </div>
+            <OverviewRow
+              label="Inactive Wallets"
+              value={wallets.length - activeWallets}
+              total={wallets.length}
+              color="bg-slate-400"
+            />
+          </div>
+        </div>
 
-            <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-300">
-              ● Test Environment
-            </span>
-          </header>
+        {/* Activity Overview */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h2 className="font-semibold text-slate-900">
+            Activity Overview
+          </h2>
 
-          {loading ? (
-            <p className="mt-12 text-slate-400">Loading dashboard...</p>
-          ) : (
-            <>
-              <div className="mt-8 rounded-2xl border border-cyan-500/20 bg-gradient-to-r from-cyan-950 to-slate-900 p-7">
-                <p className="text-slate-300">Total Wallet Balance</p>
+          <p className="mt-1 text-sm text-slate-500">
+            Current transaction activity
+          </p>
 
-                <h3 className="mt-3 text-4xl font-bold">
-                  ₹
-                  {totalBalance.toLocaleString("en-IN", {
-                    minimumFractionDigits: 2,
-                  })}
-                </h3>
+          <div className="mt-5 space-y-3">
+            <ActivityRow
+              label="Payments"
+              count={payments.length}
+              color="blue"
+            />
 
-                <p className="mt-2 text-sm text-slate-400">
-                  Aggregated demo wallet balances
-                </p>
-              </div>
+            <ActivityRow
+              label="Transfers"
+              count={transfers.length}
+              color="green"
+            />
 
-              <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {stats.map((item) => (
-                  <div
-                    key={item.label}
-                    className="rounded-xl border border-slate-800 bg-slate-900 p-6"
-                  >
-                    <p className="text-sm text-slate-400">{item.label}</p>
-
-                    <p className="mt-3 text-3xl font-bold">{item.value}</p>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-10 grid gap-6 lg:grid-cols-2">
-                <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
-                  <h3 className="mb-5 text-xl font-semibold">Wallets</h3>
-
-                  {wallets.map((wallet) => (
-                    <div
-                      key={wallet.id}
-                      className="flex justify-between border-b border-slate-800 py-4"
-                    >
-                      <div>
-                        <p className="font-medium">
-                          {wallet.full_name || "Customer"}
-                        </p>
-
-                        <p className="text-xs text-slate-400">
-                          {wallet.currency} · {wallet.status}
-                        </p>
-                      </div>
-
-                      <p className="font-semibold">
-                        {wallet.currency} {Number(wallet.balance).toFixed(2)}
-                      </p>
-                    </div>
-                  ))}
-
-                  {wallets.length === 0 && (
-                    <p className="text-slate-400">No wallets found</p>
-                  )}
-                </div>
-
-                <div className="rounded-xl border border-slate-800 bg-slate-900 p-6">
-                  <h3 className="mb-5 text-xl font-semibold">
-                    Recent Transfers
-                  </h3>
-
-                  {transfers.slice(0, 5).map((item) => (
-                    <div
-                      key={item.id}
-                      className="flex justify-between border-b border-slate-800 py-4"
-                    >
-                      <div>
-                        <p className="text-sm">{item.id.slice(0, 8)}...</p>
-
-                        <p className="text-xs text-slate-400">{item.status}</p>
-                      </div>
-
-                      <p className="font-semibold">
-                        ₹{Number(item.amount).toFixed(2)}
-                      </p>
-                    </div>
-                  ))}
-
-                  {transfers.length === 0 && (
-                    <p className="text-slate-400">No transfers yet</p>
-                  )}
-                </div>
-              </div>
-
-              <p className="mt-8 text-center text-xs text-slate-500">
-                FinCore Demo · Simulated financial data · Not real banking
-              </p>
-            </>
-          )}
-        </section>
+            <ActivityRow
+              label="Disputes"
+              count={disputes.length}
+              color="red"
+            />
+          </div>
+        </div>
       </div>
-    </main>
+    </div>
+  );
+}
+
+/* ============================= */
+/* STAT CARD */
+/* ============================= */
+
+function StatCard({
+  title,
+  value,
+  description,
+  icon,
+  color,
+}: {
+  title: string;
+  value: string;
+  description: string;
+  icon: string;
+  color: string;
+}) {
+  const colors: Record<string, string> = {
+    blue: "bg-blue-50",
+    purple: "bg-purple-50",
+    green: "bg-green-50",
+    orange: "bg-orange-50",
+    red: "bg-red-50",
+  };
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-500">{title}</p>
+
+          <p className="mt-3 text-2xl font-bold tracking-tight text-slate-900">
+            {value}
+          </p>
+
+          <p className="mt-2 text-xs text-slate-500">{description}</p>
+        </div>
+
+        <div
+          className={`flex h-11 w-11 items-center justify-center rounded-xl text-xl ${
+            colors[color] || "bg-slate-100"
+          }`}
+        >
+          {icon}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================= */
+/* OVERVIEW ROW */
+/* ============================= */
+
+function OverviewRow({
+  label,
+  value,
+  total,
+  color,
+}: {
+  label: string;
+  value: number;
+  total: number;
+  color: string;
+}) {
+  const percentage = total > 0 ? (value / total) * 100 : 0;
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between text-sm">
+        <span className="text-slate-600">{label}</span>
+
+        <span className="font-semibold text-slate-900">
+          {value} ({percentage.toFixed(0)}%)
+        </span>
+      </div>
+
+      <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className={`h-full rounded-full transition-all ${color}`}
+          style={{ width: `${percentage}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ============================= */
+/* ACTIVITY ROW */
+/* ============================= */
+
+function ActivityRow({
+  label,
+  count,
+  color,
+}: {
+  label: string;
+  count: number;
+  color: string;
+}) {
+  const colors: Record<string, string> = {
+    blue: "bg-blue-100 text-blue-700",
+    green: "bg-green-100 text-green-700",
+    red: "bg-red-100 text-red-700",
+  };
+
+  return (
+    <div className="flex items-center justify-between rounded-xl border border-slate-100 p-3">
+      <span className="text-sm text-slate-700">{label}</span>
+
+      <span
+        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+          colors[color] || "bg-slate-100 text-slate-700"
+        }`}
+      >
+        {count}
+      </span>
+    </div>
+  );
+}
+
+/* ============================= */
+/* STATUS BADGE */
+/* ============================= */
+
+function StatusBadge({ status }: { status: string }) {
+  const normalized = (status || "UNKNOWN").toUpperCase();
+
+  let classes = "bg-slate-100 text-slate-600";
+
+  if (
+    ["COMPLETED", "SUCCESS", "SUCCEEDED", "ACTIVE"].includes(normalized)
+  ) {
+    classes = "bg-green-100 text-green-700";
+  } else if (
+    ["PENDING", "PROCESSING", "IN_PROGRESS"].includes(normalized)
+  ) {
+    classes = "bg-yellow-100 text-yellow-700";
+  } else if (
+    ["FAILED", "REJECTED", "CANCELLED", "CANCELED"].includes(normalized)
+  ) {
+    classes = "bg-red-100 text-red-700";
+  }
+
+  return (
+    <span
+      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${classes}`}
+    >
+      {normalized}
+    </span>
   );
 }
