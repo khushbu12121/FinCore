@@ -61,3 +61,32 @@ FinCore/
 ├── concurrency-test.js
 ├── .env.example
 └── README.md
+
+## Screenshots
+
+### Dashboard
+![Dashboard](docs/screenshots/dashboard.png)
+
+### Customers
+![Customers](docs/screenshots/customers.png)
+
+### Wallets
+![Wallets](docs/screenshots/wallets.png)
+
+### Transfers
+![Transfers](docs/screenshots/transfers.png)
+
+### Beneficiaries
+![Beneficiaries](docs/screenshots/beneficiaries.png)
+
+### Payments
+![Payments](docs/screenshots/payments.png)
+
+### Disputes
+![Disputes](docs/screenshots/disputes.png)
+
+### Statements
+![Statements](docs/screenshots/statements.png)
+
+### CI/CD Pipeline
+![CI/CD Pipeline Success](docs/screenshots/ci-cd-success.png)
