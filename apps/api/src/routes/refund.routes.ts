@@ -1,13 +1,17 @@
-
 import { Router } from "express";
 import { pool } from "../config/database";
+import { validateLedgerEntries } from "../utils/ledger";
 
 const router = Router();
 
 router.post("/", async (req, res) => {
   const { transfer_id, amount, reason } = req.body;
+  const idempotencyKey = req.get("Idempotency-Key")?.trim();
 
   if (
+    !idempotencyKey ||
+    idempotencyKey.length === 0 ||
+    idempotencyKey.length > 255 ||
     !transfer_id ||
     typeof reason !== "string" ||
     !reason.trim() ||
@@ -16,7 +20,9 @@ router.post("/", async (req, res) => {
     amount <= 0 ||
     Math.round(amount * 100) !== amount * 100
   ) {
-    return res.status(400).json({ message: "Invalid refund details" });
+    return res.status(400).json({
+      message: "Invalid refund details or missing idempotency key"
+    });
   }
 
   const client = await pool.connect();
@@ -25,6 +31,37 @@ router.post("/", async (req, res) => {
   try {
     await client.query("BEGIN");
     transactionStarted = true;
+
+    // Check whether this refund request was already processed
+    const existingRefund = await client.query(
+      `SELECT * FROM refunds
+       WHERE idempotency_key = $1`,
+      [idempotencyKey]
+    );
+
+    if (existingRefund.rowCount && existingRefund.rowCount > 0) {
+      const existing = existingRefund.rows[0];
+
+      const sameRequest =
+        existing.transfer_id === transfer_id &&
+        Math.round(Number(existing.amount) * 100) ===
+          Math.round(amount * 100) &&
+        existing.reason === reason.trim();
+
+      await client.query("COMMIT");
+      transactionStarted = false;
+
+      if (!sameRequest) {
+        return res.status(409).json({
+          message: "Idempotency key reused with different refund details"
+        });
+      }
+
+      return res.status(200).json({
+        message: "Refund already processed",
+        refund: existing
+      });
+    }
 
     // Lock original transfer
     const transferResult = await client.query(
@@ -40,6 +77,7 @@ router.post("/", async (req, res) => {
     ) {
       await client.query("ROLLBACK");
       transactionStarted = false;
+
       return res.status(404).json({
         message: "Completed transfer not found"
       });
@@ -65,6 +103,7 @@ router.post("/", async (req, res) => {
     if (refundCents > remainingCents) {
       await client.query("ROLLBACK");
       transactionStarted = false;
+
       return res.status(400).json({
         message: "Refund exceeds remaining amount"
       });
@@ -96,10 +135,21 @@ router.post("/", async (req, res) => {
       throw new Error("Wallet details unavailable");
     }
 
+    // Validate wallet status
+    if (sender.status !== "ACTIVE" || receiver.status !== "ACTIVE") {
+      await client.query("ROLLBACK");
+      transactionStarted = false;
+
+      return res.status(400).json({
+        message: "Wallet is not active"
+      });
+    }
+
     // Recipient must still have enough funds to refund
     if (Math.round(Number(receiver.balance) * 100) < refundCents) {
       await client.query("ROLLBACK");
       transactionStarted = false;
+
       return res.status(400).json({
         message: "Recipient wallet has insufficient balance for refund"
       });
@@ -125,13 +175,31 @@ router.post("/", async (req, res) => {
       throw new Error("Ledger account missing");
     }
 
-    // Create refund record
+    // Validate reversal ledger entries before posting
+    const ledgerEntries = [
+      {
+        accountId: receiverAccount.id,
+        entryType: "DEBIT" as const,
+        amount
+      },
+      {
+        accountId: senderAccount.id,
+        entryType: "CREDIT" as const,
+        amount
+      }
+    ];
+
+    if (!validateLedgerEntries(ledgerEntries)) {
+      throw new Error("Unbalanced refund ledger entries");
+    }
+
+    // Create refund record with idempotency key
     const refundResult = await client.query(
       `INSERT INTO refunds
-       (transfer_id, amount, reason, status)
-       VALUES ($1, $2, $3, 'COMPLETED')
+       (transfer_id, amount, reason, status, idempotency_key)
+       VALUES ($1, $2, $3, 'COMPLETED', $4)
        RETURNING *`,
-      [transfer_id, amount, reason.trim()]
+      [transfer_id, amount, reason.trim(), idempotencyKey]
     );
 
     const refund = refundResult.rows[0];
@@ -148,7 +216,7 @@ router.post("/", async (req, res) => {
       ]
     );
 
-    // Reverse the original ledger entries:
+    // Reverse original ledger entries:
     // Debit recipient, credit original sender
     await client.query(
       `INSERT INTO ledger_transactions
@@ -190,12 +258,51 @@ router.post("/", async (req, res) => {
         credit: senderAccount.id
       }
     });
-  } catch (error) {
+  } catch (error: any) {
     if (transactionStarted) {
-      await client.query("ROLLBACK");
+      try {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+      } catch (rollbackError) {
+        console.error("Refund rollback failed");
+      }
     }
 
-    console.error("Refund failed:", error);
+    // Handle concurrent duplicate refund requests
+    if (error?.code === "23505" && idempotencyKey) {
+      try {
+        const existingRefund = await pool.query(
+          `SELECT * FROM refunds
+           WHERE idempotency_key = $1`,
+          [idempotencyKey]
+        );
+
+        if (existingRefund.rowCount && existingRefund.rowCount > 0) {
+          const existing = existingRefund.rows[0];
+
+          const sameRequest =
+            existing.transfer_id === transfer_id &&
+            Math.round(Number(existing.amount) * 100) ===
+              Math.round(amount * 100) &&
+            existing.reason === reason.trim();
+
+          if (!sameRequest) {
+            return res.status(409).json({
+              message: "Idempotency key reused with different refund details"
+            });
+          }
+
+          return res.status(200).json({
+            message: "Refund already processed",
+            refund: existing
+          });
+        }
+      } catch {
+        // Continue to generic failure response
+      }
+    }
+
+    console.error("Refund failed");
 
     return res.status(500).json({
       message: "Refund failed"
@@ -213,7 +320,8 @@ router.get("/", async (_req, res) => {
 
     return res.json({ refunds: result.rows });
   } catch (error) {
-    console.error(error);
+    console.error("Could not fetch refunds");
+
     return res.status(500).json({
       message: "Could not fetch refunds"
     });

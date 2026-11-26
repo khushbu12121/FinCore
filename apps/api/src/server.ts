@@ -13,6 +13,7 @@ import disputeRoutes from "./routes/dispute.routes";
 import paymentRoutes from "./routes/payment.routes";
 import statementRoutes from "./routes/statement.routes";
 import authRoutes from "./routes/auth.routes";
+import settlementRoutes from "./routes/settlement.routes";
 import {
   authenticateToken,
   authorizeRoles
@@ -39,6 +40,7 @@ app.use("/api/refunds", refundRoutes);
 app.use("/api/disputes", disputeRoutes);
 app.use("/api/payment-intents", paymentRoutes);
 app.use("/api/statements", statementRoutes);
+app.use("/api/settlements", settlementRoutes);
 app.use("/api/auth", authRoutes);
 app.get("/", (_req, res) => {
   res.json({ message: "FinCore API is running" });

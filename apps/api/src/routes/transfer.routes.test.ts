@@ -1,3 +1,4 @@
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
@@ -5,7 +6,8 @@ import request from "supertest";
 const mocks = vi.hoisted(() => ({
   query: vi.fn(),
   connect: vi.fn(),
-  scenario: "success"
+  scenario: "success",
+  idempotencyLookupCount: 0
 }));
 
 vi.mock("../config/database", () => ({
@@ -40,29 +42,57 @@ describe("Transfer route tests", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.scenario = "success";
+    mocks.idempotencyLookupCount = 0;
 
     mocks.connect.mockResolvedValue(client);
 
     mocks.query.mockImplementation(async (sql: string) => {
       const normalizedSql = sql.trim().toUpperCase();
 
-      if (normalizedSql === "BEGIN" ||
-          normalizedSql === "COMMIT" ||
-          normalizedSql === "ROLLBACK") {
+      if (
+        normalizedSql === "BEGIN" ||
+        normalizedSql === "COMMIT" ||
+        normalizedSql === "ROLLBACK"
+      ) {
         return { rowCount: 0, rows: [] };
       }
 
+      // Idempotency lookup
       if (sql.includes("SELECT id, status FROM transfers")) {
         if (mocks.scenario === "duplicate") {
           return {
             rowCount: 1,
-            rows: [{ id: "existing-transfer", status: "COMPLETED" }]
+            rows: [
+              {
+                id: "existing-transfer",
+                status: "COMPLETED"
+              }
+            ]
           };
+        }
+
+        if (mocks.scenario === "duplicate-race") {
+          mocks.idempotencyLookupCount++;
+
+          // First lookup: transfer not yet visible
+          // Second lookup: concurrent request already inserted it
+          if (mocks.idempotencyLookupCount > 1) {
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  id: "existing-transfer",
+                  status: "COMPLETED"
+                }
+              ]
+            };
+          }
         }
 
         return { rowCount: 0, rows: [] };
       }
 
+      // Wallet lookup
       if (sql.includes("FROM wallets")) {
         if (mocks.scenario === "insufficient") {
           return {
@@ -103,20 +133,30 @@ describe("Transfer route tests", () => {
         };
       }
 
+      // Transfer insertion
       if (sql.includes("INSERT INTO transfers")) {
+        if (mocks.scenario === "duplicate-race") {
+          const error: any = new Error("Duplicate idempotency key");
+          error.code = "23505";
+          throw error;
+        }
+
         return {
           rowCount: 1,
-          rows: [{
-            id: "new-transfer",
-            from_wallet_id: FROM_WALLET,
-            to_wallet_id: TO_WALLET,
-            amount: 100,
-            currency: "INR",
-            status: "COMPLETED"
-          }]
+          rows: [
+            {
+              id: "new-transfer",
+              from_wallet_id: FROM_WALLET,
+              to_wallet_id: TO_WALLET,
+              amount: 100,
+              currency: "INR",
+              status: "COMPLETED"
+            }
+          ]
         };
       }
 
+      // Ledger accounts
       if (sql.includes("FROM ledger_accounts")) {
         if (mocks.scenario === "missing-account") {
           return { rowCount: 1, rows: [] };
@@ -125,12 +165,19 @@ describe("Transfer route tests", () => {
         return {
           rowCount: 2,
           rows: [
-            { id: "sender-account", wallet_id: FROM_WALLET },
-            { id: "receiver-account", wallet_id: TO_WALLET }
+            {
+              id: "sender-account",
+              wallet_id: FROM_WALLET
+            },
+            {
+              id: "receiver-account",
+              wallet_id: TO_WALLET
+            }
           ]
         };
       }
 
+      // Journal entry
       if (sql.includes("INSERT INTO journal_entries")) {
         return {
           rowCount: 1,
@@ -138,6 +185,7 @@ describe("Transfer route tests", () => {
         };
       }
 
+      // Ledger transactions
       if (sql.includes("INSERT INTO ledger_transactions")) {
         if (mocks.scenario === "ledger-failure") {
           throw new Error("Simulated ledger insertion failure");
@@ -146,6 +194,7 @@ describe("Transfer route tests", () => {
         return { rowCount: 2, rows: [] };
       }
 
+      // Wallet balance updates
       if (sql.includes("UPDATE wallets")) {
         return { rowCount: 1, rows: [] };
       }
@@ -192,6 +241,24 @@ describe("Transfer route tests", () => {
     expect(mocks.query).not.toHaveBeenCalledWith("COMMIT");
   });
 
+  it("returns existing transfer when a concurrent request causes a unique-key conflict", async () => {
+    mocks.scenario = "duplicate-race";
+
+    const response = await request(app)
+      .post("/transfers")
+      .send(validTransfer);
+
+    expect(response.status).toBe(200);
+    expect(response.body.transfer.id).toBe("existing-transfer");
+    expect(response.body.transfer.status).toBe("COMPLETED");
+
+    expect(mocks.query).toHaveBeenCalledWith("ROLLBACK");
+    expect(mocks.query).not.toHaveBeenCalledWith("COMMIT");
+
+    expect(mocks.idempotencyLookupCount).toBe(2);
+    expect(client.release).toHaveBeenCalled();
+  });
+
   it("completes a transfer with debit and credit ledger entries", async () => {
     const response = await request(app)
       .post("/transfers")
@@ -204,10 +271,12 @@ describe("Transfer route tests", () => {
     expect(mocks.query).toHaveBeenCalledWith("COMMIT");
 
     const ledgerCall = mocks.query.mock.calls.find(
-      ([sql]) => String(sql).includes("INSERT INTO ledger_transactions")
+      ([sql]) =>
+        String(sql).includes("INSERT INTO ledger_transactions")
     );
 
     expect(ledgerCall).toBeDefined();
+
     expect(ledgerCall?.[1]).toEqual([
       "journal-001",
       "sender-account",
@@ -227,6 +296,7 @@ describe("Transfer route tests", () => {
 
     expect(response.status).toBe(500);
     expect(response.body.message).toBe("Transfer failed");
+
     expect(mocks.query).toHaveBeenCalledWith("ROLLBACK");
     expect(mocks.query).not.toHaveBeenCalledWith("COMMIT");
   });
@@ -240,6 +310,7 @@ describe("Transfer route tests", () => {
 
     expect(response.status).toBe(500);
     expect(response.body.message).toBe("Transfer failed");
+
     expect(mocks.query).toHaveBeenCalledWith("ROLLBACK");
     expect(mocks.query).not.toHaveBeenCalledWith("COMMIT");
   });

@@ -1,3 +1,4 @@
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
@@ -122,9 +123,10 @@ describe("Payment route tests", () => {
           rows: []
         };
       }
-   if (mocks.scenario === "database-failure") {
-  throw new Error("Simulated database failure");
-}
+
+      if (mocks.scenario === "database-failure") {
+        throw new Error("Simulated database failure");
+      }
 
       if (sql.includes("INSERT INTO webhook_events")) {
         if (mocks.scenario === "duplicate-webhook") {
@@ -185,10 +187,6 @@ describe("Payment route tests", () => {
         };
       }
 
-      if (mocks.scenario === "database-failure") {
-        throw new Error("Simulated database failure");
-      }
-
       return {
         rowCount: 0,
         rows: []
@@ -196,9 +194,9 @@ describe("Payment route tests", () => {
     });
   });
 
-  // ---------------------------
+  // ===========================
   // Payment Intent Tests
-  // ---------------------------
+  // ===========================
 
   it("rejects invalid payment details", async () => {
     const response = await request(app)
@@ -222,7 +220,9 @@ describe("Payment route tests", () => {
       .send(validPayment);
 
     expect(response.status).toBe(404);
-    expect(response.body.message).toBe("Customer or wallet not found");
+    expect(response.body.message).toBe(
+      "Customer or wallet not found"
+    );
   });
 
   it("creates a payment intent successfully", async () => {
@@ -240,9 +240,9 @@ describe("Payment route tests", () => {
     expect(response.body.paymentIntent.status).toBe("PENDING");
   });
 
-  // ---------------------------
+  // ===========================
   // Webhook Signature Tests
-  // ---------------------------
+  // ===========================
 
   it("rejects webhook without signature", async () => {
     const response = await request(app)
@@ -264,7 +264,9 @@ describe("Payment route tests", () => {
       .send(validWebhook);
 
     expect(response.status).toBe(401);
-    expect(response.body.message).toBe("Invalid webhook signature");
+    expect(response.body.message).toBe(
+      "Invalid webhook signature"
+    );
 
     expect(mocks.connect).not.toHaveBeenCalled();
   });
@@ -277,29 +279,39 @@ describe("Payment route tests", () => {
 
     const response = await request(app)
       .post("/payments/webhook")
-      .set("x-webhook-signature", generateSignature(invalidEvent))
+      .set(
+        "x-webhook-signature",
+        generateSignature(invalidEvent)
+      )
       .send(invalidEvent);
 
     expect(response.status).toBe(400);
-    expect(response.body.message).toBe("Invalid webhook event");
+    expect(response.body.message).toBe(
+      "Invalid webhook event"
+    );
 
     expect(mocks.connect).not.toHaveBeenCalled();
   });
 
-  // ---------------------------
+  // ===========================
   // Webhook Processing Tests
-  // ---------------------------
+  // ===========================
 
   it("ignores duplicate webhook events", async () => {
     mocks.scenario = "duplicate-webhook";
 
     const response = await request(app)
       .post("/payments/webhook")
-      .set("x-webhook-signature", generateSignature(validWebhook))
+      .set(
+        "x-webhook-signature",
+        generateSignature(validWebhook)
+      )
       .send(validWebhook);
 
     expect(response.status).toBe(200);
-    expect(response.body.message).toBe("Duplicate webhook ignored");
+    expect(response.body.message).toBe(
+      "Duplicate webhook ignored"
+    );
 
     expect(mocks.clientQuery).toHaveBeenCalledWith("BEGIN");
     expect(mocks.clientQuery).toHaveBeenCalledWith("ROLLBACK");
@@ -313,11 +325,16 @@ describe("Payment route tests", () => {
 
     const response = await request(app)
       .post("/payments/webhook")
-      .set("x-webhook-signature", generateSignature(validWebhook))
+      .set(
+        "x-webhook-signature",
+        generateSignature(validWebhook)
+      )
       .send(validWebhook);
 
     expect(response.status).toBe(404);
-    expect(response.body.message).toBe("Payment intent not found");
+    expect(response.body.message).toBe(
+      "Payment intent not found"
+    );
 
     expect(mocks.clientQuery).toHaveBeenCalledWith("ROLLBACK");
     expect(mocks.clientQuery).not.toHaveBeenCalledWith("COMMIT");
@@ -330,7 +347,10 @@ describe("Payment route tests", () => {
 
     const response = await request(app)
       .post("/payments/webhook")
-      .set("x-webhook-signature", generateSignature(validWebhook))
+      .set(
+        "x-webhook-signature",
+        generateSignature(validWebhook)
+      )
       .send(validWebhook);
 
     expect(response.status).toBe(409);
@@ -345,7 +365,10 @@ describe("Payment route tests", () => {
   it("processes successful webhook and sends notification", async () => {
     const response = await request(app)
       .post("/payments/webhook")
-      .set("x-webhook-signature", generateSignature(validWebhook))
+      .set(
+        "x-webhook-signature",
+        generateSignature(validWebhook)
+      )
       .send(validWebhook);
 
     expect(response.status).toBe(200);
@@ -360,8 +383,9 @@ describe("Payment route tests", () => {
     expect(mocks.clientQuery).toHaveBeenCalledWith("BEGIN");
     expect(mocks.clientQuery).toHaveBeenCalledWith("COMMIT");
 
+    // SQL may be formatted across multiple lines.
     expect(mocks.clientQuery).toHaveBeenCalledWith(
-      expect.stringContaining("UPDATE payment_intents SET status"),
+      expect.stringContaining("UPDATE payment_intents"),
       ["SUCCEEDED", "payment-001"]
     );
 
@@ -380,11 +404,42 @@ describe("Payment route tests", () => {
 
     const response = await request(app)
       .post("/payments/webhook")
-      .set("x-webhook-signature", generateSignature(validWebhook))
+      .set(
+        "x-webhook-signature",
+        generateSignature(validWebhook)
+      )
       .send(validWebhook);
 
     expect(response.status).toBe(200);
     expect(mocks.sendNotification).not.toHaveBeenCalled();
+  });
+
+  it("does not fail committed payment when notification fails", async () => {
+    mocks.sendNotification.mockRejectedValue(
+      new Error("Notification service unavailable")
+    );
+
+    const response = await request(app)
+      .post("/payments/webhook")
+      .set(
+        "x-webhook-signature",
+        generateSignature(validWebhook)
+      )
+      .send(validWebhook);
+
+    // Payment has already been committed.
+    expect(response.status).toBe(200);
+
+    expect(response.body.message).toBe(
+      "Webhook processed successfully"
+    );
+
+    expect(mocks.clientQuery).toHaveBeenCalledWith("COMMIT");
+    expect(mocks.clientQuery).not.toHaveBeenCalledWith("ROLLBACK");
+
+    expect(mocks.sendNotification).toHaveBeenCalled();
+
+    expect(client.release).toHaveBeenCalled();
   });
 
   it("rolls back when webhook database processing fails", async () => {
@@ -392,11 +447,16 @@ describe("Payment route tests", () => {
 
     const response = await request(app)
       .post("/payments/webhook")
-      .set("x-webhook-signature", generateSignature(validWebhook))
+      .set(
+        "x-webhook-signature",
+        generateSignature(validWebhook)
+      )
       .send(validWebhook);
 
     expect(response.status).toBe(500);
-    expect(response.body.message).toBe("Webhook processing failed");
+    expect(response.body.message).toBe(
+      "Webhook processing failed"
+    );
 
     expect(mocks.clientQuery).toHaveBeenCalledWith("ROLLBACK");
     expect(mocks.clientQuery).not.toHaveBeenCalledWith("COMMIT");

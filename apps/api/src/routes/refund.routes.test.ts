@@ -1,3 +1,4 @@
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
@@ -31,6 +32,8 @@ const validRefund = {
   reason: "Customer requested refund"
 };
 
+const IDEMPOTENCY_KEY = "refund-test-key-001";
+
 describe("Refund route tests", () => {
   const client = {
     query: mocks.query,
@@ -51,6 +54,28 @@ describe("Refund route tests", () => {
         normalizedSql === "COMMIT" ||
         normalizedSql === "ROLLBACK"
       ) {
+        return { rowCount: 0, rows: [] };
+      }
+
+      // Idempotency lookup
+      if (
+        sql.includes("SELECT * FROM refunds") &&
+        sql.includes("idempotency_key")
+      ) {
+        if (mocks.scenario === "duplicate-refund") {
+          return {
+            rowCount: 1,
+            rows: [{
+              id: "refund-001",
+              transfer_id: TRANSFER_ID,
+              amount: 50,
+              reason: "Customer requested refund",
+              status: "COMPLETED",
+              idempotency_key: IDEMPOTENCY_KEY
+            }]
+          };
+        }
+
         return { rowCount: 0, rows: [] };
       }
 
@@ -140,7 +165,8 @@ describe("Refund route tests", () => {
             transfer_id: TRANSFER_ID,
             amount: 50,
             reason: "Customer requested refund",
-            status: "COMPLETED"
+            status: "COMPLETED",
+            idempotency_key: IDEMPOTENCY_KEY
           }]
         };
       }
@@ -171,11 +197,48 @@ describe("Refund route tests", () => {
   it("rejects invalid refund details", async () => {
     const response = await request(app)
       .post("/refunds")
+      .set("Idempotency-Key", IDEMPOTENCY_KEY)
       .send({ ...validRefund, amount: -10 });
 
     expect(response.status).toBe(400);
-    expect(response.body.message).toBe("Invalid refund details");
+    expect(response.body.message).toBe(
+      "Invalid refund details or missing idempotency key"
+    );
     expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects requests without an idempotency key", async () => {
+    const response = await request(app)
+      .post("/refunds")
+      .send(validRefund);
+
+    expect(response.status).toBe(400);
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+
+  it("returns existing refund for a duplicate idempotency key", async () => {
+    mocks.scenario = "duplicate-refund";
+
+    const response = await request(app)
+      .post("/refunds")
+      .set("Idempotency-Key", IDEMPOTENCY_KEY)
+      .send(validRefund);
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe("Refund already processed");
+    expect(response.body.refund.id).toBe("refund-001");
+
+    expect(mocks.query).toHaveBeenCalledWith("BEGIN");
+    expect(mocks.query).toHaveBeenCalledWith("COMMIT");
+
+    // No new refund should be created
+    expect(
+      mocks.query.mock.calls.some(([sql]) =>
+        String(sql).includes("INSERT INTO refunds")
+      )
+    ).toBe(false);
+
+    expect(client.release).toHaveBeenCalled();
   });
 
   it("returns 404 when completed transfer is not found", async () => {
@@ -183,6 +246,7 @@ describe("Refund route tests", () => {
 
     const response = await request(app)
       .post("/refunds")
+      .set("Idempotency-Key", IDEMPOTENCY_KEY)
       .send(validRefund);
 
     expect(response.status).toBe(404);
@@ -196,6 +260,7 @@ describe("Refund route tests", () => {
 
     const response = await request(app)
       .post("/refunds")
+      .set("Idempotency-Key", IDEMPOTENCY_KEY)
       .send(validRefund);
 
     expect(response.status).toBe(400);
@@ -209,6 +274,7 @@ describe("Refund route tests", () => {
 
     const response = await request(app)
       .post("/refunds")
+      .set("Idempotency-Key", IDEMPOTENCY_KEY)
       .send(validRefund);
 
     expect(response.status).toBe(400);
@@ -223,6 +289,7 @@ describe("Refund route tests", () => {
   it("completes refund and reverses ledger entries", async () => {
     const response = await request(app)
       .post("/refunds")
+      .set("Idempotency-Key", IDEMPOTENCY_KEY)
       .send(validRefund);
 
     expect(response.status).toBe(201);
@@ -257,6 +324,7 @@ describe("Refund route tests", () => {
 
     const response = await request(app)
       .post("/refunds")
+      .set("Idempotency-Key", IDEMPOTENCY_KEY)
       .send(validRefund);
 
     expect(response.status).toBe(500);

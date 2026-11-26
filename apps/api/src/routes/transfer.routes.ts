@@ -1,6 +1,7 @@
 
 import { Router } from "express";
 import { pool } from "../config/database";
+import { validateLedgerEntries } from "../utils/ledger";
 
 const router = Router();
 
@@ -33,6 +34,7 @@ router.post("/", async (req, res) => {
 
     if (existing.rowCount! > 0) {
       await client.query("ROLLBACK");
+
       return res.status(200).json({
         message: "Duplicate request: existing transfer returned",
         transfer: existing.rows[0]
@@ -54,11 +56,17 @@ router.post("/", async (req, res) => {
       return res.status(404).json({ message: "Wallet not found" });
     }
 
-    const sender = wallets.rows.find(w => w.id === from_wallet_id);
-    const receiver = wallets.rows.find(w => w.id === to_wallet_id);
+    const sender = wallets.rows.find(
+      (w) => w.id === from_wallet_id
+    );
+
+    const receiver = wallets.rows.find(
+      (w) => w.id === to_wallet_id
+    );
 
     if (
-      !sender || !receiver ||
+      !sender ||
+      !receiver ||
       sender.status !== "ACTIVE" ||
       receiver.status !== "ACTIVE"
     ) {
@@ -81,27 +89,58 @@ router.post("/", async (req, res) => {
        (from_wallet_id, to_wallet_id, amount, currency, status, idempotency_key)
        VALUES ($1, $2, $3, $4, 'COMPLETED', $5)
        RETURNING id, from_wallet_id, to_wallet_id, amount, currency, status`,
-      [from_wallet_id, to_wallet_id, amount, sender.currency, idempotency_key]
+      [
+        from_wallet_id,
+        to_wallet_id,
+        amount,
+        sender.currency,
+        idempotency_key
+      ]
     );
 
     const transfer = transferResult.rows[0];
 
     const accounts = await client.query(
-      `SELECT id, wallet_id FROM ledger_accounts
+      `SELECT id, wallet_id
+       FROM ledger_accounts
        WHERE wallet_id = ANY($1::uuid[])`,
       [[from_wallet_id, to_wallet_id]]
     );
 
-    const senderAccount = accounts.rows.find(a => a.wallet_id === from_wallet_id);
-    const receiverAccount = accounts.rows.find(a => a.wallet_id === to_wallet_id);
+    const senderAccount = accounts.rows.find(
+      (a) => a.wallet_id === from_wallet_id
+    );
+
+    const receiverAccount = accounts.rows.find(
+      (a) => a.wallet_id === to_wallet_id
+    );
 
     if (!senderAccount || !receiverAccount) {
       throw new Error("Ledger account missing");
     }
 
+    // Validate ledger entries before posting journal
+    const ledgerEntries = [
+      {
+        accountId: senderAccount.id,
+        entryType: "DEBIT" as const,
+        amount
+      },
+      {
+        accountId: receiverAccount.id,
+        entryType: "CREDIT" as const,
+        amount
+      }
+    ];
+
+    if (!validateLedgerEntries(ledgerEntries)) {
+      throw new Error("Unbalanced ledger entries");
+    }
+
     const journal = await client.query(
       `INSERT INTO journal_entries (reference, description, status)
-       VALUES ($1, $2, 'POSTED') RETURNING id`,
+       VALUES ($1, $2, 'POSTED')
+       RETURNING id`,
       [`TRANSFER-${transfer.id}`, "Wallet transfer"]
     );
 
@@ -109,16 +148,25 @@ router.post("/", async (req, res) => {
       `INSERT INTO ledger_transactions
        (journal_entry_id, account_id, entry_type, amount)
        VALUES ($1, $2, 'DEBIT', $3), ($1, $4, 'CREDIT', $3)`,
-      [journal.rows[0].id, senderAccount.id, amount, receiverAccount.id]
+      [
+        journal.rows[0].id,
+        senderAccount.id,
+        amount,
+        receiverAccount.id
+      ]
     );
 
     await client.query(
-      `UPDATE wallets SET balance = balance - $1 WHERE id = $2`,
+      `UPDATE wallets
+       SET balance = balance - $1
+       WHERE id = $2`,
       [amount, from_wallet_id]
     );
 
     await client.query(
-      `UPDATE wallets SET balance = balance + $1 WHERE id = $2`,
+      `UPDATE wallets
+       SET balance = balance + $1
+       WHERE id = $2`,
       [amount, to_wallet_id]
     );
 
@@ -129,11 +177,36 @@ router.post("/", async (req, res) => {
       transfer
     });
   } catch (error: any) {
-    await client.query("ROLLBACK");
+    // Safely attempt rollback without masking the original error
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Transfer rollback failed:", rollbackError);
+    }
+
     console.error("Transfer failed:", error);
 
+    // Handle concurrent duplicate idempotency requests
     if (error.code === "23505") {
-      return res.status(409).json({ message: "Duplicate idempotency key" });
+      try {
+        const existing = await client.query(
+          "SELECT id, status FROM transfers WHERE idempotency_key = $1",
+          [idempotency_key]
+        );
+
+        if (existing.rowCount! > 0) {
+          return res.status(200).json({
+            message: "Duplicate request: existing transfer returned",
+            transfer: existing.rows[0]
+          });
+        }
+      } catch (lookupError) {
+        console.error("Duplicate transfer lookup failed:", lookupError);
+      }
+
+      return res.status(409).json({
+        message: "Duplicate idempotency key"
+      });
     }
 
     return res.status(500).json({ message: "Transfer failed" });
@@ -157,11 +230,11 @@ router.get("/", async (_req, res) => {
     });
   } catch (error) {
     console.error(error);
+
     return res.status(500).json({
       message: "Could not fetch transactions"
     });
   }
 });
-
 
 export default router;
